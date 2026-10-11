@@ -7,6 +7,11 @@ BANK_MARKERS = {
     "scb": ("ธนาคารไทยพาณิชย์", "ไทยพาณิชย์", "siam commercial", "scb"),
     "krungthai": ("ธนาคารกรุงไทย", "กรุงไทย", "krungthai", "ktb"),
 }
+UNSUPPORTED_BANK_MARKERS = (
+    "ธนาคาร", "kasikorn", "kbank", "กสิกรไทย", "bangkok bank", "ธนาคารกรุงเทพ",
+    "กรุงเทพ", "กรุงศรี", "krungsri", "ออมสิน", "government savings",
+    "ttb", "ทหารไทยธนชาต", "ธนาคารอาคารสงเคราะห์", "ธ.ก.ส.",
+)
 AMOUNT_LABELS = ("จำนวนเงิน", "ยอดเงิน", "amount", "transfer amount")
 AMOUNT_PATTERN = re.compile(r"(?<!\d)(\d{1,3}(?:,\d{3})*(?:\.\d{2})|\d+\.\d{2})(?!\d)")
 DATE_PATTERN = re.compile(r"(?<!\d)(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})(?!\d)")
@@ -19,6 +24,8 @@ def _find_bank(lines: list[OCRLine]) -> tuple[str | None, float]:
     # which is normally the issuing bank header, over recipient-bank mentions.
     for line in lines:
         normalized = line.text.casefold()
+        if any(marker in normalized for marker in ("ผู้รับ", "recipient", "beneficiary")):
+            continue
         matches = [
             bank for bank, markers in BANK_MARKERS.items()
             if any(marker.casefold() in normalized for marker in markers)
@@ -27,19 +34,24 @@ def _find_bank(lines: list[OCRLine]) -> tuple[str | None, float]:
             return matches[0], line.confidence
         if len(matches) > 1:
             return None, 0.0
+        if any(marker.casefold() in normalized for marker in UNSUPPORTED_BANK_MARKERS):
+            return None, 0.0
     return None, 0.0
 
 
 def _extract_amount(lines: list[OCRLine]) -> tuple[float | None, float, str | None]:
     for index, line in enumerate(lines):
-        if any(label in line.text.casefold() for label in AMOUNT_LABELS):
-            candidates = AMOUNT_PATTERN.findall(line.text)
+        normalized = line.text.casefold()
+        label = next((label for label in AMOUNT_LABELS if label in normalized), None)
+        if label is not None:
+            suffix = line.text[normalized.index(label) + len(label):]
+            candidate = AMOUNT_PATTERN.search(suffix)
             source = line
-            if not candidates and index + 1 < len(lines):
-                candidates = AMOUNT_PATTERN.findall(lines[index + 1].text)
+            if candidate is None and index + 1 < len(lines):
+                candidate = AMOUNT_PATTERN.search(lines[index + 1].text)
                 source = lines[index + 1]
-            if candidates:
-                return float(candidates[-1].replace(",", "")), source.confidence, source.text
+            if candidate:
+                return float(candidate.group(1).replace(",", "")), source.confidence, source.text
     return None, 0.0, None
 
 
@@ -48,7 +60,9 @@ def _extract_date(text: str) -> tuple[str | None, float]:
     if not match:
         return None, 0.0
     day, month, raw_year = map(int, match.groups())
-    year = raw_year + 2500 if raw_year < 100 else raw_year
+    if raw_year < 100:
+        return None, 0.0
+    year = raw_year
     if year >= 2400:
         year -= 543
     try:
