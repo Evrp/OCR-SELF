@@ -1,6 +1,9 @@
+import asyncio
+import logging
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from io import BytesIO
-import logging
+from threading import BoundedSemaphore
 from time import perf_counter
 from typing import Annotated, Any, Literal
 
@@ -36,6 +39,11 @@ app = FastAPI(
     lifespan=lifespan,
 )
 logger = logging.getLogger("pure_ai_ocr")
+
+# One PaddleOCR instance is used at a time. Keep one additional request queued;
+# reject further work instead of allowing an unbounded executor backlog.
+_OCR_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ocr")
+_OCR_CAPACITY = BoundedSemaphore(2)
 
 
 class OCRField(BaseModel):
@@ -147,12 +155,28 @@ async def recognize_slip(
             if image.width * image.height > settings.max_image_pixels * 4:
                 raise HTTPException(status_code=413, detail="Image dimensions exceed the safety limit")
             image.verify()
+    except Image.DecompressionBombError:
+        raise HTTPException(status_code=413, detail="Image dimensions exceed the safety limit") from None
     except (UnidentifiedImageError, OSError):
         raise HTTPException(status_code=400, detail="Invalid image") from None
 
     started = perf_counter()
+    if not _OCR_CAPACITY.acquire(blocking=False):
+        raise HTTPException(status_code=503, detail="OCR capacity is temporarily full")
     try:
-        lines = get_engine(settings.device).recognize(image_bytes, settings.max_image_pixels)
+        concurrent_future = _OCR_EXECUTOR.submit(
+            _recognize,
+            settings.device,
+            image_bytes,
+            settings.max_image_pixels,
+        )
+    except Exception as exc:
+        _OCR_CAPACITY.release()
+        logger.exception("Could not submit an OCR request")
+        raise HTTPException(status_code=503, detail="OCR engine is unavailable") from exc
+    concurrent_future.add_done_callback(lambda _: _OCR_CAPACITY.release())
+    try:
+        lines = await asyncio.wrap_future(concurrent_future)
     except Exception as exc:
         logger.exception("OCR engine failed while processing an uploaded image")
         raise HTTPException(status_code=503, detail="OCR engine is unavailable") from exc
@@ -160,3 +184,7 @@ async def recognize_slip(
     result["model"] = "PP-OCRv5-th"
     result["processingMs"] = round((perf_counter() - started) * 1000)
     return OCRSlipResponse(**result)
+
+
+def _recognize(device: str, image_bytes: bytes, max_pixels: int):
+    return get_engine(device).recognize(image_bytes, max_pixels)

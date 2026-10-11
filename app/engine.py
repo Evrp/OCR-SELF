@@ -1,6 +1,6 @@
 from dataclasses import dataclass
-from functools import lru_cache
 from io import BytesIO
+from threading import Lock
 
 import numpy as np
 from PIL import Image, ImageOps
@@ -25,6 +25,9 @@ class PaddleThaiOCREngine:
             use_doc_unwarping=False,
             use_textline_orientation=False,
         )
+        # PaddleOCR predictors may hold mutable inference state; serialize calls
+        # so this shared, lazily initialized engine is safe under concurrency.
+        self._predict_lock = Lock()
 
     def recognize(self, image_bytes: bytes, max_pixels: int) -> list[OCRLine]:
         with Image.open(BytesIO(image_bytes)) as image:
@@ -34,7 +37,8 @@ class PaddleThaiOCREngine:
                 image = image.resize((int(image.width * scale), int(image.height * scale)))
             image_array = np.asarray(image)
 
-        predictions = self._ocr.predict(image_array)
+        with self._predict_lock:
+            predictions = self._ocr.predict(image_array)
         lines: list[OCRLine] = []
         for prediction in predictions:
             data = prediction.json
@@ -50,6 +54,14 @@ class PaddleThaiOCREngine:
         return lines
 
 
-@lru_cache
 def get_engine(device: str) -> PaddleThaiOCREngine:
-    return PaddleThaiOCREngine(device=device)
+    with _ENGINE_INIT_LOCK:
+        engine = _ENGINES.get(device)
+        if engine is None:
+            engine = PaddleThaiOCREngine(device=device)
+            _ENGINES[device] = engine
+        return engine
+
+
+_ENGINE_INIT_LOCK = Lock()
+_ENGINES: dict[str, PaddleThaiOCREngine] = {}
