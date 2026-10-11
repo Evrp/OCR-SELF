@@ -1,4 +1,4 @@
-# Pure AI Thai Slip OCR
+# ORC-SELF — Pure AI Thai Slip OCR
 
 บริการ OCR ที่รันโมเดลเองสำหรับสลิปโอนเงิน SCB และกรุงไทย เริ่มต้นด้วย PaddleOCR PP-OCRv5 รุ่นภาษาไทย แล้วดึง field ด้วย parser แบบกำหนดกฎ ผลลัพธ์ทุกภาพยังเป็น `needs_review` จนกว่าจะผ่านการตรวจและยืนยันโดยผู้ใช้
 
